@@ -1,9 +1,9 @@
-name: Daily GreenExpo News
+name: Official Site Poll
 
 on:
   schedule:
-    # 09:00 JST = 00:00 UTC（GitHub Actionsのcronは数分〜十数分遅延することあり）
-    - cron: '0 0 * * *'
+    # 毎時5分にポーリング（0時JSTの daily と衝突しないよう5分ずらす）
+    - cron: '5 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  notify:
+  poll:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,10 +26,10 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Run daily notifier
+      - name: Poll official site
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-        run: python bot/main.py --mode daily
+        run: python bot/main.py --mode official
 
       - name: Commit state.json
         run: |
@@ -38,6 +38,6 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git pull --rebase origin main
             git add state.json
-            git commit -m "chore: update state.json (daily)"
+            git commit -m "chore: update state.json (official)"
             git push
           fi
