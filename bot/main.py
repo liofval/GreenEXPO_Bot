@@ -56,6 +56,9 @@ MIN_CORPORATE_SCORE = 1
 TITLE_SIMILARITY_THRESHOLD = 0.55
 MAX_NEWS_ITEMS = 5
 MAX_OFFICIAL_ITEMS = 10
+MAX_X_DRAFTS = 3
+X_BODY_MAX = 140
+X_HASHTAGS = "#GreenExpo2027 #国際園芸博覧会 #横浜"
 RETENTION_DAYS = 60
 LINE_TEXT_LIMIT = 4900
 OFFICIAL_SUMMARY_MAX = 120
@@ -227,6 +230,40 @@ def line_send(text: str, token: str) -> None:
         r.raise_for_status()
 
 
+# --- X draft ---
+
+def clean_title_for_x(title: str, source: str) -> str:
+    """Google Newsのタイトル末尾に付く『 - ソース名』を除去。"""
+    title = title.strip()
+    if source:
+        suffix = f" - {source}"
+        if title.endswith(suffix):
+            title = title[: -len(suffix)].strip()
+    return title
+
+
+def build_x_draft(title: str, link: str, source: str = "") -> str:
+    body = clean_title_for_x(title, source)
+    if len(body) > X_BODY_MAX:
+        body = body[: X_BODY_MAX - 1] + "…"
+    parts = [body]
+    if link:
+        parts.append(link)
+    parts.append(X_HASHTAGS)
+    return "\n".join(parts)
+
+
+def build_x_drafts_block(items: list[dict]) -> str:
+    if not items:
+        return ""
+    lines = ["", "─── X下書き ───"]
+    for it in items[:MAX_X_DRAFTS]:
+        lines.append("")
+        lines.append(build_x_draft(it["title"], it.get("link", ""), it.get("source", "")))
+        lines.append("───")
+    return "\n".join(lines)
+
+
 # --- message builders ---
 
 def build_daily_message(items: list[dict]) -> str | None:
@@ -235,8 +272,9 @@ def build_daily_message(items: list[dict]) -> str | None:
     today = datetime.now(timezone(timedelta(hours=9))).strftime("%m/%d")
     lines = [f"☀️ おはようございます ({today})", "GREEN×EXPO 2027 企業関連ニュース", ""]
     for it in items[:MAX_NEWS_ITEMS]:
+        title = clean_title_for_x(it["title"], it["source"])
         prefix = f"[{it['source']}] " if it["source"] else ""
-        lines.append(f"▪ {prefix}{it['title']}")
+        lines.append(f"▪ {prefix}{title}")
         if it["variants"]:
             lines.append(f"  関連{len(it['variants'])}件を集約")
         if it["link"]:
@@ -245,7 +283,8 @@ def build_daily_message(items: list[dict]) -> str | None:
     remaining = len(items) - MAX_NEWS_ITEMS
     if remaining > 0:
         lines.append(f"…ほか{remaining}件")
-    return "\n".join(lines).rstrip()
+    body = "\n".join(lines).rstrip()
+    return body + build_x_drafts_block(items)
 
 
 def build_official_message(items: list[dict]) -> str | None:
@@ -262,7 +301,8 @@ def build_official_message(items: list[dict]) -> str | None:
     remaining = len(items) - MAX_OFFICIAL_ITEMS
     if remaining > 0:
         lines.append(f"…ほか{remaining}件")
-    return "\n".join(lines).rstrip()
+    body = "\n".join(lines).rstrip()
+    return body + build_x_drafts_block(items)
 
 
 # --- orchestration ---
