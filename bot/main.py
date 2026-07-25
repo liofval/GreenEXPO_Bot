@@ -52,9 +52,9 @@ USER_AGENT = "Mozilla/5.0 (compatible; GreenExpoBot/1.0; +https://github.com/lio
 STATE_PATH = Path(__file__).resolve().parent.parent / "state.json"
 LEGACY_SEEN_PATH = Path(__file__).resolve().parent.parent / "seen.json"
 
-MIN_CORPORATE_SCORE = 1
+MIN_CORPORATE_SCORE = 0  # 0にすると全件通知。>0で企業関連のみ
 TITLE_SIMILARITY_THRESHOLD = 0.55
-MAX_NEWS_ITEMS = 5
+MAX_NEWS_ITEMS = 8
 MAX_OFFICIAL_ITEMS = 10
 MAX_X_DRAFTS = 3
 X_BODY_MAX = 140
@@ -270,11 +270,12 @@ def build_daily_message(items: list[dict]) -> str | None:
     if not items:
         return None
     today = datetime.now(timezone(timedelta(hours=9))).strftime("%m/%d")
-    lines = [f"☀️ おはようございます ({today})", "GREEN×EXPO 2027 企業関連ニュース", ""]
+    lines = [f"☀️ おはようございます ({today})", "GREEN×EXPO 2027 関連ニュース", ""]
     for it in items[:MAX_NEWS_ITEMS]:
         title = clean_title_for_x(it["title"], it["source"])
         prefix = f"[{it['source']}] " if it["source"] else ""
-        lines.append(f"▪ {prefix}{title}")
+        marker = "🏢 " if it.get("score", 0) > 0 else ""
+        lines.append(f"▪ {marker}{prefix}{title}")
         if it["variants"]:
             lines.append(f"  関連{len(it['variants'])}件を集約")
         if it["link"]:
@@ -321,7 +322,7 @@ def run_daily(state: dict, dry_run: bool) -> None:
     clustered = cluster_similar(filtered)
     text = build_daily_message(clustered)
     if text is None:
-        print("[daily] 新着なし（企業関連スコア閾値未満のみ）", file=sys.stderr)
+        print("[daily] 新着なし", file=sys.stderr)
         return
     if dry_run:
         print("--- daily ---")
