@@ -29,6 +29,14 @@ QUERY_TERMS = [
     '"国際園芸博 2027"',
     "横浜 園芸博",
     "横浜 花博 2027",
+    "上瀬谷 万博",
+    "旧上瀬谷通信施設 博覧会",
+    "横浜 花博",
+    "横浜 万博 2027",
+    "GREEN×EXPO協会",
+    "AIPH 2027",
+    '"Yokohama Expo 2027"',
+    '"Horticultural Expo 2027"',
 ]
 
 # 企業がイベントにどう関わっているかを重視。数値は重み。
@@ -46,6 +54,7 @@ CORPORATE_KEYWORDS: dict[str, int] = {
 OFFICIAL_BASE = "https://expo2027yokohama.or.jp"
 OFFICIAL_NEWS_URL = f"{OFFICIAL_BASE}/news/"
 RSS_TEMPLATE = "https://news.google.com/rss/search?q={query}&hl=ja&gl=JP&ceid=JP:ja"
+GNEWS_PER_QUERY_LIMIT = 20
 LINE_BROADCAST_ENDPOINT = "https://api.line.me/v2/bot/message/broadcast"
 USER_AGENT = "Mozilla/5.0 (compatible; GreenExpoBot/1.0; +https://github.com/liofval/GreenEXPO_Bot)"
 
@@ -113,29 +122,38 @@ def hash_id(key: str) -> str:
 
 # --- Google News ---
 
-def build_rss_url() -> str:
-    query = " OR ".join(f"({t})" for t in QUERY_TERMS)
-    return RSS_TEMPLATE.format(query=quote_plus(query))
+def rss_url_for(term: str) -> str:
+    return RSS_TEMPLATE.format(query=quote_plus(term))
 
 
 def fetch_google_news() -> list[dict]:
-    feed = feedparser.parse(build_rss_url())
+    """QUERY_TERMSごとに個別にRSSを取得し、URL単位でdedupして返す。
+
+    OR句を1つにまとめるとGoogle Newsが結果を絞るため、クエリを分割している。
+    """
+    seen_ids: set[str] = set()
     items: list[dict] = []
-    for entry in feed.entries:
-        key = entry.get("id") or entry.get("link") or entry.get("title", "")
-        source_obj = entry.get("source")
-        source = ""
-        if source_obj is not None:
-            if isinstance(source_obj, dict):
-                source = source_obj.get("title", "")
-            elif hasattr(source_obj, "get"):
-                source = source_obj.get("title", "")
-        items.append({
-            "id": hash_id(key),
-            "title": (entry.get("title") or "").strip(),
-            "link": entry.get("link", ""),
-            "source": source or "",
-        })
+    for term in QUERY_TERMS:
+        feed = feedparser.parse(rss_url_for(term))
+        for entry in feed.entries[:GNEWS_PER_QUERY_LIMIT]:
+            key = entry.get("id") or entry.get("link") or entry.get("title", "")
+            item_id = hash_id(key)
+            if item_id in seen_ids:
+                continue
+            seen_ids.add(item_id)
+            source_obj = entry.get("source")
+            source = ""
+            if source_obj is not None:
+                if isinstance(source_obj, dict):
+                    source = source_obj.get("title", "")
+                elif hasattr(source_obj, "get"):
+                    source = source_obj.get("title", "")
+            items.append({
+                "id": item_id,
+                "title": (entry.get("title") or "").strip(),
+                "link": entry.get("link", ""),
+                "source": source or "",
+            })
     return items
 
 
