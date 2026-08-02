@@ -39,6 +39,34 @@ QUERY_TERMS = [
     '"Horticultural Expo 2027"',
 ]
 
+# 神奈川・横浜のローカルメディア優先度。source文字列またはURLに含まれれば加点。
+# ◎特集連載/専用ページを持つメディア=5、○継続報道=3、△散発=1
+PRIORITY_MEDIA: dict[str, int] = {
+    # ◎ 特集連載あり
+    "新横浜新聞": 5, "しんよこ新聞": 5, "shin-yoko.net": 5,
+    "横浜日吉新聞": 5, "hiyosi.net": 5,
+    "神奈川新聞": 5, "カナロコ": 5, "kanaloco": 5,
+    "tvk": 5, "テレビ神奈川": 5, "tvk-yokohama": 5,
+    "ヨコハマ経済新聞": 5, "横浜経済新聞": 5, "hamakei": 5,
+    "Circular Yokohama": 5, "circular.yokohama": 5,
+    "FMヨコハマ": 5, "fmyokohama": 5, "Fm yokohama": 5,
+    "タウンニュース": 5, "townnews": 5,
+    "日本経済新聞": 4, "日経クロステック": 4,
+    # ○ 継続報道
+    "朝日新聞": 3, "asahi.com/area/kanagawa": 3,
+    "横浜で暮らそう": 3, "sumaitoseikatsu": 3,
+    "港北経済新聞": 3, "kohoku.keizai": 3,
+    "湘南人": 3, "shonanjin": 3,
+    "観光経済新聞": 3, "kankokeizai": 3,
+    # △ 散発
+    "東京新聞": 1, "tokyo-np": 1,
+    "日本農業新聞": 1, "agrinews": 1,
+    "はまれぽ": 1, "hamarepo": 1,
+    "マグカル": 1, "magcul": 1,
+    "Time Out Tokyo": 1, "timeout.jp": 1,
+    "NHK": 1,
+}
+
 # 企業がイベントにどう関わっているかを重視。数値は重み。
 CORPORATE_KEYWORDS: dict[str, int] = {
     "協賛": 5, "スポンサー": 5, "スポンサーシップ": 5,
@@ -160,6 +188,11 @@ def fetch_google_news() -> list[dict]:
 def score_corporate(item: dict) -> int:
     text = item.get("title", "")
     return sum(w for kw, w in CORPORATE_KEYWORDS.items() if kw in text)
+
+
+def score_media(item: dict) -> int:
+    haystack = f"{item.get('source','')} {item.get('link','')}"
+    return max((w for kw, w in PRIORITY_MEDIA.items() if kw in haystack), default=0)
 
 
 def normalize_title(title: str) -> str:
@@ -292,8 +325,14 @@ def build_daily_message(items: list[dict]) -> str | None:
     for it in items[:MAX_NEWS_ITEMS]:
         title = clean_title_for_x(it["title"], it["source"])
         prefix = f"[{it['source']}] " if it["source"] else ""
-        marker = "🏢 " if it.get("score", 0) > 0 else ""
-        lines.append(f"▪ {marker}{prefix}{title}")
+        markers = ""
+        if it.get("media_score", 0) > 0:
+            markers += "📰"
+        if it.get("corp_score", 0) > 0:
+            markers += "🏢"
+        if markers:
+            markers += " "
+        lines.append(f"▪ {markers}{prefix}{title}")
         if it["variants"]:
             lines.append(f"  関連{len(it['variants'])}件を集約")
         if it["link"]:
@@ -333,7 +372,9 @@ def run_daily(state: dict, dry_run: bool) -> None:
     for it in items:
         if it["id"] in state["news_seen"]:
             continue
-        it["score"] = score_corporate(it)
+        it["corp_score"] = score_corporate(it)
+        it["media_score"] = score_media(it)
+        it["score"] = it["corp_score"] + it["media_score"]
         state["news_seen"][it["id"]] = now_iso
         new_items.append(it)
     filtered = [x for x in new_items if x["score"] >= MIN_CORPORATE_SCORE]
