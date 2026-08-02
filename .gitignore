@@ -4,3 +4,7 @@ __pycache__/
 venv/
 .env
 .DS_Store
+
+# ローカル戦略ドキュメント（非公開）
+MEDIA_STRATEGY.md
+
