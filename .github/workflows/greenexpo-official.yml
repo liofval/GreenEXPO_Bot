@@ -24,19 +24,19 @@ jobs:
           python-version: '3.12'
           cache: pip
 
-      - run: pip install -r requirements.txt
+      - run: pip install -r greenexpo/requirements.txt
 
       - name: Poll official site
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-        run: python bot/main.py --mode official
+        run: python greenexpo/main.py --mode official
 
       - name: Commit state.json
         run: |
-          if [[ -z "$(git status --porcelain state.json)" ]]; then exit 0; fi
+          if [[ -z "$(git status --porcelain greenexpo/state.json)" ]]; then exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
+          git add greenexpo/state.json
           git commit -m "chore: update state.json (official)"
           git pull --rebase origin main
           git push

@@ -86,8 +86,7 @@ GNEWS_PER_QUERY_LIMIT = 20
 LINE_BROADCAST_ENDPOINT = "https://api.line.me/v2/bot/message/broadcast"
 USER_AGENT = "Mozilla/5.0 (compatible; GreenExpoBot/1.0; +https://github.com/liofval/GreenEXPO_Bot)"
 
-STATE_PATH = Path(__file__).resolve().parent.parent / "state.json"
-LEGACY_SEEN_PATH = Path(__file__).resolve().parent.parent / "seen.json"
+STATE_PATH = Path(__file__).resolve().parent / "state.json"
 
 MIN_CORPORATE_SCORE = 0  # 0にすると全件通知。>0で企業関連のみ
 TITLE_SIMILARITY_THRESHOLD = 0.55
@@ -113,11 +112,6 @@ def load_state() -> dict:
         data = {}
     data.setdefault("news_seen", {})
     data.setdefault("official_seen", {})
-    if not data["news_seen"] and LEGACY_SEEN_PATH.exists():
-        try:
-            data["news_seen"].update(json.loads(LEGACY_SEEN_PATH.read_text(encoding="utf-8")))
-        except json.JSONDecodeError:
-            pass
     return data
 
 
