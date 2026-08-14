@@ -5,6 +5,11 @@ on:
     # 毎時15分（greenexpo-official の :05 と時間をずらす）
     - cron: '15 * * * *'
   workflow_dispatch:
+    inputs:
+      test_post:
+        description: 'Post synthetic test hits to Slack (skip fetch)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,7 +34,7 @@ jobs:
       - name: Poll PR TIMES
         env:
           SLACK_WEBHOOK_URL_BOSYU: ${{ secrets.SLACK_WEBHOOK_URL_BOSYU }}
-        run: python student-bosyu/main.py
+        run: python student-bosyu/main.py ${{ inputs.test_post && '--test' || '' }}
 
       - name: Commit state.json
         run: |
