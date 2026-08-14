@@ -48,18 +48,18 @@ Google News に載る GREEN×EXPO 2027 関連の全記事から、以下の観�
 
 - Python 3.12 (GitHub Actions側) / 3.13 (ローカル)
 - GitHub Actions cron
-  - `daily-notify.yml`: 毎日 00:00 UTC (= 09:00 JST)
-  - `official-poll.yml`: 毎時5分
+  - `greenexpo-daily.yml`: 毎日 00:00 UTC (= 09:00 JST)
+  - `greenexpo-official.yml`: 毎時5分
 
 ## セットアップ (開発者向け)
 
 ```bash
 # 依存インストール
 python3.13 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r greenexpo/requirements.txt
 
 # ローカルで動作確認
-.venv/bin/python bot/main.py --dry-run --mode both
+.venv/bin/python greenexpo/main.py --dry-run --mode both
 ```
 
 デプロイには GitHub Secret `LINE_CHANNEL_ACCESS_TOKEN` (LINE Messaging APIの長期トークン) が必要です。
