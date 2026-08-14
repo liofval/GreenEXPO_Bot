@@ -220,11 +220,69 @@ def run(state: dict, dry_run: bool) -> int:
     return 0
 
 
+TEST_ITEMS: list[dict] = [
+    {
+        "id": "test-1",
+        "title": "【テスト投稿】学生実行委員募集：GREEN×EXPO 2027 学生アンバサダー第一期",
+        "link": "https://prtimes.jp/main/html/rd/p/000000000.000000001.html",
+        "description": "横浜で開催される国際園芸博覧会にて、学生実行委員として運営に携わる大学生を募集します。任期は2026年9月〜2027年11月。",
+        "company": "株式会社テスト（合成データ）",
+        "score": 22,
+        "hits": ["学生アンバサダー", "学生実行委員", "実行委員募集", "横浜", "green×expo", "国際園芸博"],
+        "category": "student_org",
+        "category_display": "🏫 学生団体",
+    },
+    {
+        "id": "test-2",
+        "title": "【テスト投稿】長期インターン募集：新規事業立ち上げに参画する大学生・大学院生",
+        "link": "https://prtimes.jp/main/html/rd/p/000000000.000000002.html",
+        "description": "大学生・大学院生対象。有給。週3日〜。",
+        "company": "テスト株式会社（合成データ）",
+        "score": 8,
+        "hits": ["学生インターン", "長期インターン"],
+        "category": "internship",
+        "category_display": "💼 学生インターン",
+    },
+    {
+        "id": "test-3",
+        "title": "【テスト投稿】学生対象ビジネスコンテスト参加者募集開始",
+        "link": "https://prtimes.jp/main/html/rd/p/000000000.000000003.html",
+        "description": "賞金100万円。全国の大学生・大学院生を対象。",
+        "company": "サンプル合同会社（合成データ）",
+        "score": 13,
+        "hits": ["学生 コンテスト", "大学生 コンテスト", "学生対象", "学生 向け"],
+        "category": "contest",
+        "category_display": "🏆 コンテスト",
+    },
+]
+
+
+def run_test(dry_run: bool) -> int:
+    """合成データでSlack投稿パイプラインだけをテスト。state・fetchは触らない。"""
+    print(f"[bosyu][test] posting {len(TEST_ITEMS)} synthetic hits", file=sys.stderr)
+    if dry_run:
+        print("--- student-bosyu test (dry-run) ---")
+        for h in TEST_ITEMS:
+            print(f"[score {h['score']}] {h['category_display']} {h['company']}")
+            print(f"  {h['title']}")
+        return 0
+    webhook = os.environ.get("SLACK_WEBHOOK_URL_BOSYU")
+    if not webhook:
+        print("SLACK_WEBHOOK_URL_BOSYU is not set", file=sys.stderr)
+        return 2
+    slack_post(webhook, TEST_ITEMS)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Slack投稿せず標準出力にヒット一覧を表示")
     parser.add_argument("--no-save", action="store_true", help="state.jsonを書き換えない（テスト用）")
+    parser.add_argument("--test", action="store_true", help="合成データでSlack投稿だけをテスト（fetchもstateも触らない）")
     args = parser.parse_args()
+
+    if args.test:
+        return run_test(args.dry_run)
 
     state = load_state()
     state["seen"] = prune(state["seen"])
