@@ -1,14 +1,14 @@
-"""PRTIMES から学生向け募集を検知して Slack に通知するbot。
+"""Web広く「企画スタッフ・登壇・ハッカソン枠」を検知してSlackに通知するbot。
 
-- 毎時poll: PR TIMES RSS(index.rdf) から全プレスリリースを取得
-- 2段フィルタ: 対象語(学生等) AND 募集語 → スコアリング → 閾値以上を通知
+- 複数ソース（Google News RSS / connpass API / Peatix）から新着itemを取得
+- 2段フィルタ: 対象語 AND 募集語 → スコアリング → 閾値以上を通知
 - 通知: Slack Incoming Webhook (Block Kit)
-- 重複排除: state.json に投稿済みURLを保存、60日で剪定
+- 運営母体の公式SNS (X, Instagram) を記事本文から抽出して同梱
+- 重複排除: state.json に投稿済みIDを保存、60日で剪定
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import json
 import os
@@ -17,9 +17,9 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import feedparser
 import requests
 
+from fetchers import connpass, google, peatix
 from keywords import (
     has_excluded,
     matches_recruit,
@@ -27,16 +27,20 @@ from keywords import (
     score,
     tag_category,
 )
-
-PRTIMES_RSS = "https://prtimes.jp/index.rdf"
-USER_AGENT = "Mozilla/5.0 (compatible; StudentBosyuBot/1.0; +https://github.com/liofval/GreenEXPO_Bot)"
+from sns_extractor import SnsHandles, extract as extract_sns
 
 STATE_PATH = Path(__file__).resolve().parent / "state.json"
 RETENTION_DAYS = 60
-SCORE_THRESHOLD = 3          # これ以上のスコアで通知
-DESCRIPTION_MAX = 180        # Slack本文の抜粋長
-MAX_ITEMS_PER_POST = 20      # 1メッセージあたり最大件数（超過分は分割）
+SCORE_THRESHOLD = 8          # これ以上のスコアで通知
+DESCRIPTION_MAX = 200
+MAX_ITEMS_PER_POST = 20
 REQUEST_TIMEOUT = 30
+
+SOURCE_DISPLAY = {
+    "google": "Google",
+    "connpass": "connpass",
+    "peatix": "Peatix",
+}
 
 
 # --- state ---
@@ -76,44 +80,29 @@ def truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def hash_id(key: str) -> str:
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+# --- fetch ---
 
-
-# --- PR TIMES ---
-
-def fetch_prtimes() -> list[dict]:
-    """PR TIMES RSSからプレスリリースを取得。"""
-    feed = feedparser.parse(PRTIMES_RSS, agent=USER_AGENT)
-    items: list[dict] = []
-    for entry in feed.entries:
-        link = entry.get("link", "").strip()
-        if not link:
-            continue
-        title = (entry.get("title") or "").strip()
-        description = strip_html(entry.get("summary") or entry.get("description") or "")
-        # PR TIMES RSS の dc:corp に会社名。無ければ description 冒頭の [会社名] を抜く。
-        company = (entry.get("dc_corp") or "").strip()
-        if not company:
-            m = re.match(r"\s*\[([^\]]+)\]", description)
-            if m:
-                company = m.group(1).strip()
-        # description 冒頭の [会社名] を本文からは削除
-        description = re.sub(r"^\s*\[[^\]]+\]\s*", "", description)
-        items.append({
-            "id": hash_id(link),
-            "title": title,
-            "link": link,
-            "description": description,
-            "company": company,
-        })
-    return items
+def fetch_all() -> list[dict]:
+    # connpass は CloudFront WAF で 403、Peatix は SPA 化で通常HTTP fetchが空。
+    # コードは fetchers/ に残してあるので API キー取得や headless 導入時に有効化する。
+    active = (("google", google.fetch),)
+    all_items: list[dict] = []
+    for name, fn in active:
+        try:
+            items = fn()
+            print(f"[bosyu] source={name} fetched={len(items)}", file=sys.stderr)
+            all_items.extend(items)
+        except Exception as e:
+            print(f"[bosyu] source={name} failed: {e}", file=sys.stderr)
+    return all_items
 
 
 # --- filter & score ---
 
 def evaluate(item: dict) -> dict | None:
-    """1件を評価。通知対象なら score/category/hits を付けて返す。除外なら None。"""
+    """1件を評価。通知対象なら score/category/hits/sns を付けて返す。除外なら None。"""
+    # descriptionにHTMLが含まれるソース(connpass等)があるためstrip
+    item["description"] = strip_html(item.get("description", ""))
     text = f"{item['title']} {item['description']}"
     if not matches_target(text) or not matches_recruit(text):
         return None
@@ -127,25 +116,38 @@ def evaluate(item: dict) -> dict | None:
     item["hits"] = hits
     item["category"] = cat[0] if cat else "other"
     item["category_display"] = cat[1] if cat else "🎓 その他"
+    item["sns"] = extract_sns(
+        f"{item['title']} {item['description']}",
+        extra_urls=item.get("extra_urls") or [],
+    )
     return item
 
 
 # --- Slack ---
 
+def _sns_line(sns: SnsHandles) -> str:
+    parts: list[str] = []
+    if sns.x_url and sns.x_handle:
+        parts.append(f"<{sns.x_url}|X {sns.x_handle}>")
+    if sns.instagram_url and sns.instagram_handle:
+        parts.append(f"<{sns.instagram_url}|Instagram {sns.instagram_handle}>")
+    return "📱 " + " · ".join(parts) if parts else ""
+
+
 def build_blocks(items: list[dict]) -> list[dict]:
-    """Slack Block Kit ペイロードを組み立て。"""
     blocks: list[dict] = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": f"🎓 学生向け募集の新着 ({len(items)}件)"},
+            "text": {"type": "plain_text", "text": f"🎯 企画スタッフ・登壇枠の新着 ({len(items)}件)"},
         },
         {"type": "divider"},
     ]
     for it in items:
-        company = it["company"] or "（会社名不明）"
+        company = it["company"] or "（主催者不明）"
         title = it["title"]
         desc = truncate(it["description"], DESCRIPTION_MAX) if it["description"] else ""
-        tag_line = f"{it['category_display']}  *{company}*"
+        source_tag = SOURCE_DISPLAY.get(it.get("source", ""), it.get("source", ""))
+        tag_line = f"{it['category_display']}  *{company}*  · via {source_tag}"
         hits_line = " ".join(f"`{h}`" for h in it["hits"][:6]) if it["hits"] else ""
         body_parts = [
             tag_line,
@@ -155,6 +157,9 @@ def build_blocks(items: list[dict]) -> list[dict]:
             body_parts.append(f"> {desc}")
         if hits_line:
             body_parts.append(f"🏷 {hits_line} · score {it['score']}")
+        sns_line = _sns_line(it["sns"])
+        if sns_line:
+            body_parts.append(sns_line)
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": "\n".join(body_parts)},
@@ -164,11 +169,10 @@ def build_blocks(items: list[dict]) -> list[dict]:
 
 
 def slack_post(webhook_url: str, items: list[dict]) -> None:
-    """複数件を MAX_ITEMS_PER_POST ずつに分割して投稿。"""
     for i in range(0, len(items), MAX_ITEMS_PER_POST):
         chunk = items[i : i + MAX_ITEMS_PER_POST]
         payload = {
-            "text": f"学生向け募集の新着 {len(chunk)}件",  # fallback text
+            "text": f"企画スタッフ・登壇枠の新着 {len(chunk)}件",
             "blocks": build_blocks(chunk),
         }
         r = requests.post(webhook_url, json=payload, timeout=REQUEST_TIMEOUT)
@@ -180,11 +184,7 @@ def slack_post(webhook_url: str, items: list[dict]) -> None:
 # --- orchestration ---
 
 def run(state: dict, dry_run: bool) -> int:
-    try:
-        items = fetch_prtimes()
-    except Exception as e:
-        print(f"[bosyu] fetch failed: {e}", file=sys.stderr)
-        return 1
+    items = fetch_all()
     now_iso = datetime.now(timezone.utc).isoformat()
     hits: list[dict] = []
     new_count = 0
@@ -198,17 +198,20 @@ def run(state: dict, dry_run: bool) -> int:
             hits.append(evaluated)
 
     hits.sort(key=lambda x: -x["score"])
-    print(f"[bosyu] fetched={len(items)} new={new_count} hits={len(hits)}", file=sys.stderr)
+    print(f"[bosyu] total_fetched={len(items)} new={new_count} hits={len(hits)}", file=sys.stderr)
 
     if not hits:
         return 0
     if dry_run:
         print("--- student-bosyu (dry-run) ---")
         for h in hits:
-            print(f"[score {h['score']}] {h['category_display']} {h['company']}")
+            print(f"[score {h['score']}] {h['category_display']} {h['company']} · via {h.get('source')}")
             print(f"  {h['title']}")
             print(f"  {h['link']}")
             print(f"  hits: {', '.join(h['hits'])}")
+            sns: SnsHandles = h["sns"]
+            if sns.any():
+                print(f"  sns: X={sns.x_handle or '-'} IG={sns.instagram_handle or '-'}")
             print()
         return 0
 
@@ -220,50 +223,75 @@ def run(state: dict, dry_run: bool) -> int:
     return 0
 
 
+# --- test data ---
+
 TEST_ITEMS: list[dict] = [
     {
         "id": "test-1",
-        "title": "【テスト投稿】学生実行委員募集：GREEN×EXPO 2027 学生アンバサダー第一期",
-        "link": "https://prtimes.jp/main/html/rd/p/000000000.000000001.html",
-        "description": "横浜で開催される国際園芸博覧会にて、学生実行委員として運営に携わる大学生を募集します。任期は2026年9月〜2027年11月。",
-        "company": "株式会社テスト（合成データ）",
-        "score": 22,
-        "hits": ["学生アンバサダー", "学生実行委員", "実行委員募集", "横浜", "green×expo", "国際園芸博"],
-        "category": "student_org",
-        "category_display": "🏫 学生団体",
+        "source": "google",
+        "title": "【テスト投稿】SPIKES in IVS 2027 企画スタッフ募集開始",
+        "link": "https://example.com/ivs-spikes",
+        "description": "IVS 2027 の伝説の裏方部隊「SPIKES」の第一期メンバーを募集します。イベント全体の企画運営に若手クリエイターとして参画できます。 https://x.com/ivs_official https://instagram.com/ivs_official",
+        "company": "IVS運営事務局（合成データ）",
+        "score": 18,
+        "hits": ["SPIKES in IVS", "SPIKES", "企画スタッフ", "IVS", "クリエイター"],
+        "category": "staff_planning",
+        "category_display": "🛠 企画スタッフ",
+        "sns": SnsHandles(
+            x_handle="@ivs_official", x_url="https://x.com/ivs_official",
+            instagram_handle="@ivs_official", instagram_url="https://instagram.com/ivs_official",
+        ),
     },
     {
         "id": "test-2",
-        "title": "【テスト投稿】長期インターン募集：新規事業立ち上げに参画する大学生・大学院生",
-        "link": "https://prtimes.jp/main/html/rd/p/000000000.000000002.html",
-        "description": "大学生・大学院生対象。有給。週3日〜。",
-        "company": "テスト株式会社（合成データ）",
-        "score": 8,
-        "hits": ["学生インターン", "長期インターン"],
-        "category": "internship",
-        "category_display": "💼 学生インターン",
+        "source": "connpass",
+        "title": "【テスト投稿】東京都主催 SUSHITECH ITAMAE 第2期募集",
+        "link": "https://example.com/sushitech",
+        "description": "スタートアップと行政をつなぐ「ITAMAE」を募集。企画スタッフとして SUSHI TECH TOKYO の中核を担っていただきます。 https://x.com/sushitech_tokyo",
+        "company": "東京都SUSHITECH事務局（合成データ）",
+        "score": 15,
+        "hits": ["ITAMAE", "SUSHITECH", "企画スタッフ", "スタートアップ"],
+        "category": "staff_planning",
+        "category_display": "🛠 企画スタッフ",
+        "sns": SnsHandles(
+            x_handle="@sushitech_tokyo", x_url="https://x.com/sushitech_tokyo",
+        ),
     },
     {
         "id": "test-3",
-        "title": "【テスト投稿】学生対象ビジネスコンテスト参加者募集開始",
-        "link": "https://prtimes.jp/main/html/rd/p/000000000.000000003.html",
-        "description": "賞金100万円。全国の大学生・大学院生を対象。",
-        "company": "サンプル合同会社（合成データ）",
-        "score": 13,
-        "hits": ["学生 コンテスト", "大学生 コンテスト", "学生対象", "学生 向け"],
-        "category": "contest",
-        "category_display": "🏆 コンテスト",
+        "source": "connpass",
+        "title": "【テスト投稿】未来の食×AIハッカソン 参加者募集",
+        "link": "https://example.com/food-ai-hackathon",
+        "description": "48時間で「未来の食」をAIでハックする。学生・若手エンジニア対象。賞金50万円。 https://twitter.com/food_ai_hack",
+        "company": "テック合同会社（合成データ）",
+        "score": 12,
+        "hits": ["ハッカソン", "エンジニア", "学生", "賞金"],
+        "category": "hackathon",
+        "category_display": "🧠 ハッカソン",
+        "sns": SnsHandles(x_handle="@food_ai_hack", x_url="https://twitter.com/food_ai_hack"),
+    },
+    {
+        "id": "test-4",
+        "source": "peatix",
+        "title": "【テスト投稿】U30起業家ピッチイベント 登壇者募集",
+        "link": "https://example.com/pitch",
+        "description": "U-30の起業家によるピッチイベント。登壇者を全国から募集します。優勝者には賞金100万円。",
+        "company": "スタートアップ協議会（合成データ）",
+        "score": 14,
+        "hits": ["登壇者募集", "ピッチイベント", "起業家", "U-30", "賞金"],
+        "category": "pitch",
+        "category_display": "🎤 ピッチ登壇",
+        "sns": SnsHandles(),
     },
 ]
 
 
 def run_test(dry_run: bool) -> int:
-    """合成データでSlack投稿パイプラインだけをテスト。state・fetchは触らない。"""
     print(f"[bosyu][test] posting {len(TEST_ITEMS)} synthetic hits", file=sys.stderr)
     if dry_run:
         print("--- student-bosyu test (dry-run) ---")
         for h in TEST_ITEMS:
-            print(f"[score {h['score']}] {h['category_display']} {h['company']}")
+            print(f"[score {h['score']}] {h['category_display']} {h['company']} · via {h['source']}")
             print(f"  {h['title']}")
         return 0
     webhook = os.environ.get("SLACK_WEBHOOK_URL_BOSYU")

@@ -31,7 +31,7 @@ jobs:
 
       - run: pip install -r student-bosyu/requirements.txt
 
-      - name: Poll PR TIMES
+      - name: Poll recruitment sources
         env:
           SLACK_WEBHOOK_URL_BOSYU: ${{ secrets.SLACK_WEBHOOK_URL_BOSYU }}
         run: python student-bosyu/main.py ${{ inputs.test_post && '--test' || '' }}
