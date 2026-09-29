@@ -27,11 +27,13 @@ from keywords import (
     score,
     tag_category,
 )
+from organizer_extractor import Organizers, extract as extract_organizers
 from sns_extractor import SnsHandles, extract as extract_sns
 
 STATE_PATH = Path(__file__).resolve().parent / "state.json"
 RETENTION_DAYS = 60
 SCORE_THRESHOLD = 8          # これ以上のスコアで通知
+MAX_AGE_DAYS = 3             # これより古い投稿/記事は通知しない
 DESCRIPTION_MAX = 200
 MAX_ITEMS_PER_POST = 20
 REQUEST_TIMEOUT = 30
@@ -99,6 +101,19 @@ def fetch_all() -> list[dict]:
 
 # --- filter & score ---
 
+def _is_fresh(published_at: str) -> bool:
+    """published_at (UTC ISO) が今から MAX_AGE_DAYS 以内なら True。空/不正は False。"""
+    if not published_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(published_at)
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt >= datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
+
+
 def evaluate(item: dict) -> dict | None:
     """1件を評価。通知対象なら score/category/hits/sns を付けて返す。除外なら None。"""
     # descriptionにHTMLが含まれるソース(connpass等)があるためstrip
@@ -120,6 +135,7 @@ def evaluate(item: dict) -> dict | None:
         f"{item['title']} {item['description']}",
         extra_urls=item.get("extra_urls") or [],
     )
+    item["organizers"] = extract_organizers(text)
     return item
 
 
@@ -132,6 +148,24 @@ def _sns_line(sns: SnsHandles) -> str:
     if sns.instagram_url and sns.instagram_handle:
         parts.append(f"<{sns.instagram_url}|Instagram {sns.instagram_handle}>")
     return "📱 " + " · ".join(parts) if parts else ""
+
+
+_ORG_LABELS = (
+    ("organizer", "主催"),
+    ("co_organizer", "共催"),
+    ("sponsor", "協賛"),
+    ("supporter", "後援"),
+    ("cooperator", "協力"),
+)
+
+
+def _organizers_line(orgs: Organizers) -> str:
+    parts: list[str] = []
+    for attr, label in _ORG_LABELS:
+        names = getattr(orgs, attr)
+        if names:
+            parts.append(f"{label}: " + " / ".join(names))
+    return "🏢 " + " ｜ ".join(parts) if parts else ""
 
 
 def build_blocks(items: list[dict]) -> list[dict]:
@@ -147,7 +181,13 @@ def build_blocks(items: list[dict]) -> list[dict]:
         title = it["title"]
         desc = truncate(it["description"], DESCRIPTION_MAX) if it["description"] else ""
         source_tag = SOURCE_DISPLAY.get(it.get("source", ""), it.get("source", ""))
-        tag_line = f"{it['category_display']}  *{company}*  · via {source_tag}"
+        pub_tag = ""
+        if it.get("published_at"):
+            try:
+                pub_tag = " · " + datetime.fromisoformat(it["published_at"]).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        tag_line = f"{it['category_display']}  *{company}*  · via {source_tag}{pub_tag}"
         hits_line = " ".join(f"`{h}`" for h in it["hits"][:6]) if it["hits"] else ""
         body_parts = [
             tag_line,
@@ -157,6 +197,9 @@ def build_blocks(items: list[dict]) -> list[dict]:
             body_parts.append(f"> {desc}")
         if hits_line:
             body_parts.append(f"🏷 {hits_line} · score {it['score']}")
+        org_line = _organizers_line(it["organizers"])
+        if org_line:
+            body_parts.append(org_line)
         sns_line = _sns_line(it["sns"])
         if sns_line:
             body_parts.append(sns_line)
@@ -188,27 +231,47 @@ def run(state: dict, dry_run: bool) -> int:
     now_iso = datetime.now(timezone.utc).isoformat()
     hits: list[dict] = []
     new_count = 0
+    stale_drop = 0
     for it in items:
         if it["id"] in state["seen"]:
             continue
         new_count += 1
         state["seen"][it["id"]] = now_iso
+        if not _is_fresh(it.get("published_at", "")):
+            stale_drop += 1
+            continue
         evaluated = evaluate(it)
         if evaluated:
             hits.append(evaluated)
 
     hits.sort(key=lambda x: -x["score"])
-    print(f"[bosyu] total_fetched={len(items)} new={new_count} hits={len(hits)}", file=sys.stderr)
+    print(
+        f"[bosyu] total_fetched={len(items)} new={new_count} stale_drop={stale_drop} "
+        f"hits={len(hits)} (max_age={MAX_AGE_DAYS}d)",
+        file=sys.stderr,
+    )
 
     if not hits:
         return 0
     if dry_run:
         print("--- student-bosyu (dry-run) ---")
         for h in hits:
-            print(f"[score {h['score']}] {h['category_display']} {h['company']} · via {h.get('source')}")
+            pub = ""
+            if h.get("published_at"):
+                try:
+                    pub = " · " + datetime.fromisoformat(h["published_at"]).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+            print(f"[score {h['score']}] {h['category_display']} {h['company']} · via {h.get('source')}{pub}")
             print(f"  {h['title']}")
             print(f"  {h['link']}")
             print(f"  hits: {', '.join(h['hits'])}")
+            orgs: Organizers = h["organizers"]
+            if orgs.any():
+                for attr, label in _ORG_LABELS:
+                    names = getattr(orgs, attr)
+                    if names:
+                        print(f"  {label}: {', '.join(names)}")
             sns: SnsHandles = h["sns"]
             if sns.any():
                 print(f"  sns: X={sns.x_handle or '-'} IG={sns.instagram_handle or '-'}")
@@ -241,6 +304,10 @@ TEST_ITEMS: list[dict] = [
             x_handle="@ivs_official", x_url="https://x.com/ivs_official",
             instagram_handle="@ivs_official", instagram_url="https://instagram.com/ivs_official",
         ),
+        "organizers": Organizers(
+            organizer=["IVS運営事務局"],
+            sponsor=["京都府", "京都市"],
+        ),
     },
     {
         "id": "test-2",
@@ -256,6 +323,10 @@ TEST_ITEMS: list[dict] = [
         "sns": SnsHandles(
             x_handle="@sushitech_tokyo", x_url="https://x.com/sushitech_tokyo",
         ),
+        "organizers": Organizers(
+            organizer=["東京都"],
+            sponsor=["三菱UFJ銀行", "みずほ銀行", "伊藤忠商事"],
+        ),
     },
     {
         "id": "test-3",
@@ -269,6 +340,10 @@ TEST_ITEMS: list[dict] = [
         "category": "hackathon",
         "category_display": "🧠 ハッカソン",
         "sns": SnsHandles(x_handle="@food_ai_hack", x_url="https://twitter.com/food_ai_hack"),
+        "organizers": Organizers(
+            organizer=["テック合同会社"],
+            supporter=["経済産業省"],
+        ),
     },
     {
         "id": "test-4",
@@ -282,6 +357,7 @@ TEST_ITEMS: list[dict] = [
         "category": "pitch",
         "category_display": "🎤 ピッチ登壇",
         "sns": SnsHandles(),
+        "organizers": Organizers(organizer=["スタートアップ協議会"]),
     },
 ]
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
 import feedparser
@@ -64,6 +65,10 @@ def fetch(queries: tuple[str, ...] = DEFAULT_QUERIES) -> list[dict]:
             source_name = ""
             if entry.get("source") and isinstance(entry.source, dict):
                 source_name = (entry.source.get("title") or "").strip()
+            pub = entry.get("published_parsed")
+            published_at = (
+                datetime(*pub[:6], tzinfo=timezone.utc).isoformat() if pub else ""
+            )
             items.append({
                 "id": _hash_id("google", link),
                 "source": "google",
@@ -72,5 +77,6 @@ def fetch(queries: tuple[str, ...] = DEFAULT_QUERIES) -> list[dict]:
                 "description": description,
                 "company": source_name,   # ソースメディア名を仮の"company"に流用
                 "extra_urls": [link],     # SNS抽出のためにリンク自体も渡す
+                "published_at": published_at,  # UTC ISO文字列、取れなければ ""
             })
     return items
